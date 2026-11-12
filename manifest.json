@@ -1,0 +1,8 @@
+{
+    "display_name": "JAI Lorebook Converter",
+    "loading_order": 100,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "version": "0.2.1"
+}

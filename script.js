@@ -1170,7 +1170,7 @@ let lastOut = "", pendingEntries = null, pendingFmt = "";
 function getOutlet() {
   const v = document.getElementById("outletName").value.trim(), n = document.getElementById("lbName").value.trim();
   if (v) return v;
-  if (n) return n.toLowerCase().replace(/[^a-z0-9]/g, "_") + "_knowledge";
+  if (n) return (n.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "lorebook") + "_knowledge";
   return "lorebook_knowledge";
 }
 function getFilename() {

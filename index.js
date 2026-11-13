@@ -1,9 +1,11 @@
-// JAI Lorebook Converter for SillyTavern (v0.2.1)
+// JAI Lorebook Converter for SillyTavern (v0.3.2)
 //
 // Converts JanitorAI lorebooks and scripts to SillyTavern World Info during import.
 // Supported inputs (same as the web converter): JAI lorebook JSON, loreEntries script,
 // Advanced Lore script, if-chain script, and any of those pasted into a .docx.
-// Conversion uses the web converter's own code and its "Simple mode" defaults.
+// Conversion uses the web converter's own code. For scripts, the popup lets the user choose where
+// personality text goes (an outlet, or merged into the scenario entry) and whether NPC and Location
+// entries go before or after the character definitions (the same options the web converter offers).
 //
 // How it hooks in: SillyTavern's backend only checks `'entries' in json`, which is also true
 // for any JSON array, so a JAI lorebook gets saved as-is and shows up empty. A capture-phase
@@ -18,7 +20,8 @@
 // Only the public SillyTavern.getContext() API is used (no imports from ST internals).
 
 const MODULE_NAME = 'jai_lorebook_converter';
-const DEFAULT_SETTINGS = Object.freeze({ enabled: true, advancedScripts: false });
+// personalityMode: 'outlet' | 'merge'    npcLocationPos: 'after' | 'before'  (last choices made in the popup)
+const DEFAULT_SETTINGS = Object.freeze({ enabled: true, advancedScripts: false, personalityMode: 'outlet', npcLocationPos: 'after' });
 const IMPORT_INPUT_ID = 'world_import_file';
 const EXTRA_ACCEPT = ['.txt', '.js', '.docx'];
 // Formats that are read by executing the file's text as JavaScript.
@@ -39,7 +42,6 @@ const CONVERTER_STRINGS_EN = {
     keysSplit: (n, k) => "<strong>" + n + " " + (n === 1 ? "entry" : "entries") + "</strong> had keywords packed into a single item (like <code>/a/b/c/</code> or <code>a, b, c</code>) — split into proper separate keywords (" + k + " total).",
     badKeywords: (n, d) => "<strong>" + n + " " + (n === 1 ? "entry" : "entries") + "</strong> had a keyword field that looked like pasted content, not trigger words (" + d + " item" + (d === 1 ? "" : "s") + ", too long or containing newlines) — moved into the entry's content and the keyword field cleared for you to fill in.",
     jaiPosSet: "Position set to <strong>Before Char (0)</strong> for all entries. Adjust in ST as needed.",
-    scriptSplit: "Each script entry generates up to <strong>2 ST entries</strong> (scenario + personality). Adjust positions in the panel if needed.",
     scriptRepaired: (s) => {
     const parts = [];
     if (s.unclosedStrings) parts.push(s.unclosedStrings + " unclosed string" + (s.unclosedStrings === 1 ? "" : "s"));
@@ -47,7 +49,6 @@ const CONVERTER_STRINGS_EN = {
     if (s.prematureCloses) parts.push(s.prematureCloses + " array" + (s.prematureCloses === 1 ? "" : "s") + " that got closed early, orphaning entries after it");
     return "<strong>Auto-repaired " + parts.length + " syntax issue" + (parts.length === 1 ? "" : "s") + "</strong> in your script so it could still parse: " + parts.join(", ") + ". Double-check the affected entries came through correctly.";
   },
-    outletReminder: "For any entries mapped to <strong>7 / Outlet</strong>, make sure to add <code>{{outlet::name}}</code> to your character card.",
     filtersUsed: (n) => "<strong>" + n + " entries</strong> use filters — mapped to ST secondary keys.",
     ifChainDup: "If-chain scripts may have duplicate keyword sets. They have been grouped under the <strong>If-Chain</strong> category.",
     dynLoreInlined: (n) => "<strong>" + n + " trigger-only entr" + (n === 1 ? "y" : "ies") + "</strong> (tag-based, no keywords) " + (n === 1 ? "was" : "were") + " merged into whichever entry emits its tag — ST has no cross-entry tag system, so if two entries share a trigger tag, that content may now appear twice in the same turn instead of once.",
@@ -66,7 +67,6 @@ const CONVERTER_STRINGS_RU = {
     keysSplit: (n, k) => "<strong>" + n + " " + ruPlural(n, "запись", "записи", "записей") + "</strong> содержали ключевые слова, склеенные в один элемент (например, <code>/a/b/c/</code> или <code>a, b, c</code>) — разделены на отдельные ключевые слова (всего " + k + ").",
     badKeywords: (n, d) => "<strong>" + n + " " + ruPlural(n, "запись", "записи", "записей") + "</strong> содержали поле ключевых слов, похожее на вставленный текст, а не на триггерные слова (" + d + " " + ruPlural(d, "элемент", "элемента", "элементов") + ", слишком длинные или с переносами строки) — перенесено в поле содержимого записи, а поле ключевых слов очищено для ручного заполнения.",
     jaiPosSet: "Для всех записей выставлена позиция <strong>Перед описанием персонажа (0)</strong>. При необходимости измените её в ST.",
-    scriptSplit: "Каждая запись скрипта создаёт до <strong>2 записей ST</strong> (scenario + personality). При необходимости измените позиции в панели выше.",
     scriptRepaired: (s) => {
     const parts = [];
     if (s.unclosedStrings) parts.push(s.unclosedStrings + " " + ruPlural(s.unclosedStrings, "незакрытая строка", "незакрытые строки", "незакрытых строк"));
@@ -74,7 +74,6 @@ const CONVERTER_STRINGS_RU = {
     if (s.prematureCloses) parts.push(s.prematureCloses + " " + ruPlural(s.prematureCloses, "преждевременно закрытый массив", "преждевременно закрытых массива", "преждевременно закрытых массивов") + ", из-за чего часть записей осталась «снаружи»");
     return "<strong>Автоматически исправлено " + parts.length + " " + ruPlural(parts.length, "синтаксическая ошибка", "синтаксические ошибки", "синтаксических ошибок") + "</strong> в скрипте, чтобы его вообще можно было разобрать: " + parts.join(", ") + ". Проверьте, что затронутые записи собрались верно.";
   },
-    outletReminder: "Для всех записей, привязанных к позиции <strong>7 / Outlet</strong>, добавьте <code>{{outlet::name}}</code> в карточку персонажа.",
     filtersUsed: (n) => "<strong>" + n + " " + ruPlural(n, "запись", "записи", "записей") + "</strong> используют фильтры — они сопоставлены с дополнительными ключами (secondary) в ST.",
     ifChainDup: "Скрипты if-chain могут содержать повторяющиеся наборы ключевых слов. Они сгруппированы в категорию <strong>If-Chain</strong>.",
     dynLoreInlined: (n) => "<strong>" + n + " " + ruPlural(n, "запись-триггер", "записи-триггера", "записей-триггеров") + "</strong> (по тегу, без ключевых слов) объединены с записью, которая испускает этот тег — в ST нет межзаписевой системы тегов, поэтому если тег испускают две записи, этот текст может появиться дважды за один ход вместо одного раза.",
@@ -96,6 +95,16 @@ const UI_STRINGS_EN = {
     enableScriptsHint: 'These two script types can only be read by running the script text as JavaScript inside SillyTavern. Enable only for files you trust. If-chain scripts are converted without running anything.',
     popupTitle: 'Convert to SillyTavern format?',
     popupBody: (name, fmt, src, st) => 'The file "' + name + '" is a ' + fmt + ' (' + src + ' source entr' + (src === 1 ? 'y' : 'ies') + ' \u2192 ' + st + ' SillyTavern entr' + (st === 1 ? 'y' : 'ies') + '). SillyTavern cannot read this format directly.',
+    popupBodyScript: (name, fmt, src) => 'The file "' + name + '" is a ' + fmt + ' (' + src + ' entr' + (src === 1 ? 'y' : 'ies') + '). SillyTavern cannot read this format directly. Choose where the converted text goes:',
+    persHeading: 'Personality text',
+    persOutlet: 'Use an outlet (position 7)',
+    persOutletHint: (macro) => 'Add ' + macro + ' to the character card (anywhere in it), otherwise this text will never appear.',
+    outletNameLabel: 'Outlet name',
+    persMerge: 'Merge into the scenario entry (no outlet needed)',
+    locHeading: 'NPC and Location entries',
+    locAfter: 'After character definitions',
+    locBefore: 'Before character definitions',
+    locHint: 'All other entries go before character definitions.',
     convert: 'Convert & import',
     cancel: 'Cancel',
     convertFailed: 'Could not convert this file. Nothing was imported.',
@@ -110,6 +119,16 @@ const UI_STRINGS_RU = {
     enableScriptsHint: 'Эти два типа скриптов можно прочитать только запустив текст скрипта как JavaScript внутри SillyTavern. Включайте только для файлов, которым доверяете. Скрипты if-chain конвертируются без запуска кода.',
     popupTitle: 'Конвертировать в формат SillyTavern?',
     popupBody: (name, fmt, src, st) => 'Файл «' + name + '» — ' + fmt + ' (' + src + ' ' + ruPlural(src, 'исходная запись', 'исходные записи', 'исходных записей') + ' → ' + st + ' ' + ruPlural(st, 'запись', 'записи', 'записей') + ' SillyTavern). SillyTavern не умеет читать этот формат напрямую.',
+    popupBodyScript: (name, fmt, src) => 'Файл «' + name + '» — ' + fmt + ' (' + src + ' ' + ruPlural(src, 'запись', 'записи', 'записей') + '). SillyTavern не умеет читать этот формат напрямую. Выберите, куда поместить сконвертированный текст:',
+    persHeading: 'Текст личности',
+    persOutlet: 'Использовать outlet (позиция 7)',
+    persOutletHint: (macro) => 'Добавьте ' + macro + ' в карточку персонажа (в любое место), иначе этот текст никогда не появится.',
+    outletNameLabel: 'Имя outlet',
+    persMerge: 'Объединить с записью сценария (outlet не нужен)',
+    locHeading: 'Записи NPC и локаций',
+    locAfter: 'После описания персонажа',
+    locBefore: 'Перед описанием персонажа',
+    locHint: 'Все остальные записи размещаются перед описанием персонажа.',
     convert: 'Конвертировать и импортировать',
     cancel: 'Отмена',
     convertFailed: 'Не удалось сконвертировать файл. Ничего не импортировано.',
@@ -1060,10 +1079,11 @@ function buildExportJson(entriesObj) {
 
 const baseName = (fileName) => fileName.replace(/\.[^./\\]+$/, '');
 
-// Same rule as the web converter's getOutlet(), with the file name standing in for the lorebook name.
+// Same rule as the web converter's getOutlet(), with the file name standing in for the lorebook name:
+// runs of other characters become one underscore, ends are trimmed, and 'lorebook' is used if nothing is left.
 function outletFromName(fileName) {
-    const n = baseName(fileName).trim();
-    return n ? n.toLowerCase().replace(/[^a-z0-9]/g, '_') + '_knowledge' : 'lorebook_knowledge';
+    const slug = baseName(fileName).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    return (slug || 'lorebook') + '_knowledge';
 }
 
 // Same warnings as the web converter's buildWarnings(), for the formats the extension converts.
@@ -1078,8 +1098,6 @@ function buildNotes(fmt, sourceEntries, stEntries, L) {
     if (lastScriptRepairStats && (lastScriptRepairStats.unclosedStrings || lastScriptRepairStats.missingCommas || lastScriptRepairStats.prematureCloses)) {
         w.push(L.scriptRepaired(lastScriptRepairStats));
     }
-    w.push(L.scriptSplit);
-    if (Object.values(stEntries).some((e) => e.position === 7)) w.push(L.outletReminder);
     if (fmt === 'jai_script') {
         const f = sourceEntries.filter((e) => e.filters && Object.keys(e.filters).length > 0);
         if (f.length) w.push(L.filtersUsed(f.length));
@@ -1104,6 +1122,29 @@ function isNativeStFormat(parsed) {
         || parsed.lorebookVersion !== undefined
         || parsed.kind === 'memory'
         || parsed.type === 'risu';
+}
+
+/** The popup's choices as last saved (used for the preview conversion and as popup defaults). */
+function savedChoices() {
+    const s = getSettings();
+    return { personalityMode: s.personalityMode === 'merge' ? 'merge' : 'outlet', npcLocationPos: s.npcLocationPos === 'before' ? 'before' : 'after', outletName: '' };
+}
+
+/**
+ * Script entries -> ST entries, using the web converter's own scriptToST.
+ * personalityMode 'outlet': personality text becomes its own entry at position 7 (Outlet).
+ * personalityMode 'merge':  personality text is merged into the scenario entry (the converter's merge option).
+ * npcLocationPos: where categories smartScenPos() puts "after character" (NPC, Location, ...) go; everything else is "before".
+ */
+function convertScript(srcEntries, choices, fileName) {
+    const locationScen = choices.npcLocationPos === 'before' ? '0' : '1';
+    const catMap = {};
+    for (const cat of new Set(srcEntries.map((e) => e.category || ''))) {
+        const auto = smartScenPos(cat);
+        catMap[cat] = { scen: auto === '1' ? locationScen : auto, scenDepth: 4, pers: '7', persDepth: 4 };
+    }
+    const outlet = (choices.outletName || '').trim() || outletFromName(fileName);
+    return scriptToST(srcEntries, catMap, outlet, { merge: choices.personalityMode === 'merge', scenPref: '', persPref: '' });
 }
 
 const PASS = { action: 'pass' };
@@ -1152,22 +1193,21 @@ function analyze(text, fileName, L) {
             toastr.warning(det.type === 'if_chain' ? L.noKeywordEntries() : L.noEntriesLoreEntries());
             return CANCEL;
         }
-        // Defaults of the web converter's Simple mode: scenario text by category, personality text at 4:0 (@ Depth, System role, depth 4).
-        const catMap = {};
-        for (const cat of new Set(srcEntries.map((e) => e.category || ''))) {
-            catMap[cat] = { scen: smartScenPos(cat), scenDepth: 4, pers: '4:0', persDepth: 4 };
-        }
-        const res = scriptToST(srcEntries, catMap, outletFromName(fileName), { merge: false, scenPref: '', persPref: '' });
-        stEntries = res.entries;
-        stCount = res.count;
+        // Preview conversion with the saved choices: fills the converter's stats (for the notes)
+        // and catches an empty result early. The real conversion runs after the popup.
+        const preview = convertScript(srcEntries, savedChoices(), fileName);
+        stEntries = preview.entries;
+        stCount = preview.count;
     }
     if (!stCount) {
         toastr.warning(L.noKeywordEntries());
         return CANCEL;
     }
+    const isScript = det.type !== 'jai_json';
     return {
         action: 'ask',
-        json: buildExportJson(stEntries),
+        json: isScript ? null : buildExportJson(stEntries),
+        srcEntries: isScript ? srcEntries : null,
         formatLabel,
         srcCount: srcEntries.length,
         stCount,
@@ -1175,23 +1215,79 @@ function analyze(text, fileName, L) {
     };
 }
 
+function el(tag, props = {}) {
+    const node = document.createElement(tag);
+    Object.assign(node, props);
+    return node;
+}
+
+function radioRow(id, group, checked, text) {
+    const label = el('label', { className: 'checkbox_label' });
+    const input = el('input', { id, type: 'radio', name: group, checked });
+    label.append(input, el('span', { textContent: text }));
+    return { label, input };
+}
+
+/** The choices block of the popup (scripts only). Only shows the questions that apply to this file. */
+function buildScriptOptions(result, fileName, L) {
+    const saved = savedChoices();
+    const hasPersonality = result.srcEntries.some((e) => e.personality);
+    const hasLocations = result.srcEntries.some((e) => smartScenPos(e.category) === '1');
+    const root = el('div');
+    const ctl = {};
+
+    if (hasPersonality) {
+        root.append(el('h4', { textContent: L.persHeading }));
+        const outlet = radioRow('jai_conv_pers_outlet', 'jai_conv_pers', saved.personalityMode === 'outlet', L.persOutlet);
+        const merge = radioRow('jai_conv_pers_merge', 'jai_conv_pers', saved.personalityMode === 'merge', L.persMerge);
+        const nameInput = el('input', { id: 'jai_conv_outlet_name', className: 'text_pole', type: 'text', value: outletFromName(fileName) }); // text_pole: ST's own input class, follows the user's theme colors
+        const nameRow = el('label');
+        nameRow.append(el('span', { textContent: L.outletNameLabel + ': ' }), nameInput);
+        const hint = el('small', { id: 'jai_conv_outlet_hint' });
+        const refresh = () => {
+            const name = nameInput.value.trim() || outletFromName(fileName);
+            hint.textContent = L.persOutletHint('{{outlet::' + name + '}}');
+            nameRow.hidden = hint.hidden = !outlet.input.checked;
+        };
+        for (const [node, evt] of [[outlet.input, 'change'], [merge.input, 'change'], [nameInput, 'input']]) node.addEventListener(evt, refresh);
+        refresh();
+        root.append(outlet.label, nameRow, hint, merge.label);
+        Object.assign(ctl, { merge: merge.input, nameInput });
+    }
+
+    if (hasLocations) {
+        root.append(el('h4', { textContent: L.locHeading }));
+        const after = radioRow('jai_conv_loc_after', 'jai_conv_loc', saved.npcLocationPos === 'after', L.locAfter);
+        const before = radioRow('jai_conv_loc_before', 'jai_conv_loc', saved.npcLocationPos === 'before', L.locBefore);
+        root.append(after.label, before.label, el('small', { textContent: L.locHint }));
+        ctl.before = before.input;
+    }
+
+    const read = () => ({
+        personalityMode: ctl.merge ? (ctl.merge.checked ? 'merge' : 'outlet') : saved.personalityMode,
+        outletName: ctl.nameInput ? ctl.nameInput.value : '',
+        npcLocationPos: ctl.before ? (ctl.before.checked ? 'before' : 'after') : saved.npcLocationPos,
+    });
+    return { root, read };
+}
+
 function buildPopupContent(fileName, result, L) {
-    const root = document.createElement('div');
-    const heading = document.createElement('h3');
-    heading.textContent = L.popupTitle;
-    const body = document.createElement('p');
-    body.textContent = L.popupBody(fileName, result.formatLabel, result.srcCount, result.stCount);
-    root.append(heading, body);
+    const root = el('div');
+    const isScript = !!result.srcEntries;
+    root.append(el('h3', { textContent: L.popupTitle }));
+    root.append(el('p', { textContent: isScript ? L.popupBodyScript(fileName, result.formatLabel, result.srcCount) : L.popupBody(fileName, result.formatLabel, result.srcCount, result.stCount) }));
+    const options = isScript ? buildScriptOptions(result, fileName, L) : null;
+    if (options) root.append(options.root);
     if (result.notes.length) {
-        const list = document.createElement('ul');
+        const list = el('ul');
         for (const note of result.notes) {
-            const li = document.createElement('li');
+            const li = el('li');
             li.innerHTML = note; // note strings are built only from the converter's own constants and numbers
             list.append(li);
         }
         root.append(list);
     }
-    return root;
+    return { root, readChoices: options ? options.read : null };
 }
 
 async function readImportText(file) {
@@ -1222,13 +1318,29 @@ async function prepareImport(file) {
     }
     if (result.action !== 'ask') return result;
 
-    const { callGenericPopup, POPUP_TYPE, POPUP_RESULT } = SillyTavern.getContext();
-    const content = buildPopupContent(file.name, result, L);
-    const answer = await callGenericPopup(content, POPUP_TYPE.CONFIRM, '', { okButton: L.convert, cancelButton: L.cancel, wide: true, allowVerticalScrolling: true });
+    const { callGenericPopup, POPUP_TYPE, POPUP_RESULT, saveSettingsDebounced } = SillyTavern.getContext();
+    const popup = buildPopupContent(file.name, result, L);
+    const answer = await callGenericPopup(popup.root, POPUP_TYPE.CONFIRM, '', { okButton: L.convert, cancelButton: L.cancel, wide: true, allowVerticalScrolling: true });
     if (answer !== POPUP_RESULT.AFFIRMATIVE) return CANCEL;
 
+    let json = result.json;
+    if (result.srcEntries) {
+        const choices = popup.readChoices ? popup.readChoices() : savedChoices();
+        try {
+            json = buildExportJson(convertScript(result.srcEntries, choices, file.name).entries);
+        } catch (err) {
+            console.error(`[${MODULE_NAME}] conversion failed`, err);
+            toastr.error(L.convertFailed);
+            return CANCEL;
+        }
+        const s = getSettings();
+        s.personalityMode = choices.personalityMode;
+        s.npcLocationPos = choices.npcLocationPos;
+        saveSettingsDebounced();
+    }
+
     // ST derives the lorebook name from everything before the last dot in the file name.
-    return { action: 'convert', file: new File([result.json], baseName(file.name) + '.json', { type: 'application/json' }) };
+    return { action: 'convert', file: new File([json], baseName(file.name) + '.json', { type: 'application/json' }) };
 }
 
 function refire(input, replacementFile) {
